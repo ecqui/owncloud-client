@@ -38,7 +38,7 @@ ownCloudTheme::ownCloudTheme() :
 
 QString ownCloudTheme::configFileName() const
 {
-    return QLatin1String("owncloud.cfg");
+    return QLatin1String("sbox-svd-bau.cfg");
 }
 
 QString ownCloudTheme::about() const
@@ -91,13 +91,13 @@ QVariant ownCloudTheme::customMedia(Theme::CustomMediaType type)
 
 QString ownCloudTheme::helpUrl() const
 {
-    return QString::fromLatin1("https://doc.owncloud.org/desktop/%1.%2/").arg(MIRALL_VERSION_MAJOR).arg(MIRALL_VERSION_MINOR);
+    return QString::fromLatin1("https://sbox-svd-bau.svdgmbh.at/");
 }
 
 #ifndef TOKEN_AUTH_ONLY
 QColor ownCloudTheme::wizardHeaderBackgroundColor() const
 {
-    return QColor("#1d2d42");
+    return QColor("#a3a8aa");
 }
 
 QColor ownCloudTheme::wizardHeaderTitleColor() const
@@ -113,12 +113,12 @@ QPixmap ownCloudTheme::wizardHeaderLogo() const
 
 QString ownCloudTheme::appName() const
 {
-    return QLatin1String("ownCloud");
+    return QLatin1String("S-BOX SVD-Bau");
 }
 
 QString ownCloudTheme::appNameGUI() const
 {
-    return QLatin1String("ownCloud");
+    return QLatin1String("S-BOX SVD-Bau");
 }
 
 
