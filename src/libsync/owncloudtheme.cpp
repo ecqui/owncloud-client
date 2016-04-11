@@ -89,7 +89,17 @@ QVariant ownCloudTheme::customMedia(Theme::CustomMediaType type)
 
 #endif
 
+bool ownCloudTheme::multiAccount() const
+{
+    return false;
+}
+
 QString ownCloudTheme::helpUrl() const
+{
+    return QString::fromLatin1("https://sbox-svd-bau.svdgmbh.at/");
+}
+
+QString ownCloudTheme::overrideServerUrl() const 
 {
     return QString::fromLatin1("https://sbox-svd-bau.svdgmbh.at/");
 }

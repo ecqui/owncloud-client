@@ -38,8 +38,9 @@ public:
 #endif
     QString appName() const Q_DECL_OVERRIDE;
     QString appNameGUI() const Q_DECL_OVERRIDE;
-
+    bool multiAccount() const Q_DECL_OVERRIDE;
     QString helpUrl() const Q_DECL_OVERRIDE;
+    QString overrideServerUrl() const Q_DECL_OVERRIDE;
 #ifndef TOKEN_AUTH_ONLY
     QVariant customMedia(CustomMediaType type) Q_DECL_OVERRIDE;
 
