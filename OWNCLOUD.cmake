@@ -1,5 +1,5 @@
 set( APPLICATION_NAME       "S-BOX SVD-Bau" )
-set( APPLICATION_EXECUTABLE "sbox_SVD-Bau" )
+set( APPLICATION_EXECUTABLE "S-BOX SVD-Bau" )
 set( APPLICATION_DOMAIN     "sbox-svd-bau.svdgmbh.at" )
 set( APPLICATION_VENDOR     "ecqui GmbH" )
 set( APPLICATION_UPDATE_URL "https://sbox-svd-bau.svdgmbh.at/client/" CACHE string "URL for updater" )
