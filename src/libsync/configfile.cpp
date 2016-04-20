@@ -412,7 +412,7 @@ bool ConfigFile::skipUpdateCheck( const QString& connection ) const
     QString con( connection );
     if( connection.isEmpty() ) con = defaultConnection();
 
-    QVariant fallback = getValue(QLatin1String(skipUpdateCheckC), con, false);
+    QVariant fallback = getValue(QLatin1String(skipUpdateCheckC), con, true);
     fallback = getValue(QLatin1String(skipUpdateCheckC), QString(), fallback);
 
     QVariant value = getPolicySetting(QLatin1String(skipUpdateCheckC), fallback);
