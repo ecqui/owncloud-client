@@ -208,7 +208,7 @@ bool LsColXMLParser::parse( const QByteArray& xml, QHash<QString, qint64> *sizes
             QString propertyContent = readContentsAsString(reader);
             if (name == QLatin1String("resourcetype") && propertyContent.contains("collection")) {
                 folders.append(currentHref);
-            } else if (name == QLatin1String("quota-used-bytes")) {
+            } else if (name == QLatin1String("size")) {
                 bool ok = false;
                 auto s = propertyContent.toLongLong(&ok);
                 if (ok && sizes) {
@@ -490,6 +490,10 @@ void PropfindJob::start()
         qWarning() << "Propfind with no properties!";
     }
     QNetworkRequest req;
+    // Always have a higher priority than the propagator because we use this from the UI
+    // and really want this to be done first (no matter what internal scheduling QNAM uses).
+    // Also possibly useful for avoiding false timeouts.
+    req.setPriority(QNetworkRequest::HighPriority);
     req.setRawHeader("Depth", "0");
     QByteArray propStr;
     foreach (const QByteArray &prop, properties) {
@@ -554,11 +558,16 @@ bool PropfindJob::finished()
                 }
             }
         }
-        emit result(items);
+        if (reader.hasError()) {
+            qDebug() << "PROPFIND request XML parser error: " << reader.errorString();
+            emit finishedWithError(reply());
+        } else {
+            emit result(items);
+        }
     } else {
         qDebug() << "PROPFIND request *not* successful, http result code is" << http_result_code
                  << (http_result_code == 302 ? reply()->header(QNetworkRequest::LocationHeader).toString()  : QLatin1String(""));
-        emit finishedWithError();
+        emit finishedWithError(reply());
     }
     return true;
 }

@@ -88,6 +88,11 @@ public:
 
     virtual JobParallelism parallelism() { return FullParallelism; }
 
+    /**
+     * For "small" jobs
+     */
+    virtual bool isLikelyFinishedQuickly() { return false; }
+
     /** The space that the running jobs need to complete but don't actually use yet.
      *
      * Note that this does *not* include the disk space that's already
@@ -278,7 +283,6 @@ public:
             , _journal(progressDb)
             , _finishedEmited(false)
             , _bandwidthManager(this)
-            , _activeJobs(0)
             , _anotherSyncNeeded(false)
             , _account(account)
     { }
@@ -293,14 +297,20 @@ public:
 
     QAtomicInt _abortRequested; // boolean set by the main thread to abort.
 
-    /* The number of currently active jobs */
-    int _activeJobs;
+    /** The list of currently active jobs.
+        This list contains the jobs that are currently using ressources and is used purely to
+        know how many jobs there is currently running for the scheduler.
+        Jobs add themself to the list when they do an assynchronous operation.
+        Jobs can be several time on the list (example, when several chunks are uploaded in parallel)
+     */
+    QList<PropagateItemJob*> _activeJobList;
 
     /** We detected that another sync is required after this one */
     bool _anotherSyncNeeded;
 
     /* The maximum number of active jobs in parallel  */
     int maximumActiveJob();
+    int hardMaximumActiveJob();
 
     bool isInSharedDirectory(const QString& file);
     bool localFileNameClash(const QString& relfile);
@@ -364,6 +374,9 @@ signals:
     void progress(const SyncFileItem&, quint64 bytes);
     void finished();
 
+    /** Emitted when propagation has problems with a locked file. */
+    void seenLockedFile(const QString &fileName);
+
 private:
 
     AccountPtr _account;
@@ -371,6 +384,12 @@ private:
     /** Stores the time since a job touched a file. */
     QHash<QString, QElapsedTimer> _touchedFiles;
     mutable QMutex _touchedFilesMutex;
+
+#if QT_VERSION < QT_VERSION_CHECK(5, 0, 0)
+    // access to signals which are protected in Qt4
+    friend class PropagateDownloadFileQNAM;
+    friend class PropagateUploadFileQNAM;
+#endif
 };
 
 

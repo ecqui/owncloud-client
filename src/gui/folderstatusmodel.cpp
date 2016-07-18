@@ -145,7 +145,7 @@ QVariant FolderStatusModel::data(const QModelIndex &index, int role) const
         case Qt::ToolTipRole:
         case Qt::DisplayRole:
             //: Example text: "File.txt (23KB)"
-            return tr("%1 (%2)").arg(x._name, Utility::octetsToString(x._size));
+            return x._size < 0 ? x._name : tr("%1 (%2)").arg(x._name, Utility::octetsToString(x._size));
         case Qt::CheckStateRole:
             return x._checked;
         case Qt::DecorationRole:
@@ -185,16 +185,19 @@ QVariant FolderStatusModel::data(const QModelIndex &index, int role) const
     const bool accountConnected = _accountState->isConnected();
 
     switch (role) {
-    case FolderStatusDelegate::FolderPathRole         : return  f->shortGuiPath();
+    case FolderStatusDelegate::FolderPathRole         : return  f->shortGuiLocalPath();
     case FolderStatusDelegate::FolderSecondPathRole   : return  f->remotePath();
     case FolderStatusDelegate::FolderErrorMsg         : return  f->syncResult().errorStrings();
     case FolderStatusDelegate::SyncRunning            : return  f->syncResult().status() == SyncResult::SyncRunning;
-    case FolderStatusDelegate::HeaderRole             : return  f->aliasGui();
+    case FolderStatusDelegate::HeaderRole             : return  f->shortGuiRemotePathOrAppName();
     case FolderStatusDelegate::FolderAliasRole        : return  f->alias();
     case FolderStatusDelegate::FolderSyncPaused       : return  f->syncPaused();
     case FolderStatusDelegate::FolderAccountConnected : return  accountConnected;
     case Qt::ToolTipRole: {
         QString toolTip;
+        if (!progress.isNull()) {
+            return progress._progressString;
+        }
         if ( accountConnected )
             toolTip = Theme::instance()->statusHeaderText(f->syncResult().status());
         else
@@ -517,7 +520,7 @@ void FolderStatusModel::fetchMore(const QModelIndex& parent)
         path += info->_path;
     }
     LsColJob *job = new LsColJob(_accountState->account(), path, this);
-    job->setProperties(QList<QByteArray>() << "resourcetype" << "quota-used-bytes");
+    job->setProperties(QList<QByteArray>() << "resourcetype" << "http://owncloud.org/ns:size");
     job->setTimeout(60 * 1000);
     connect(job, SIGNAL(directoryListingSubfolders(QStringList)),
             SLOT(slotUpdateDirectories(QStringList)));
@@ -559,12 +562,17 @@ void FolderStatusModel::slotUpdateDirectories(const QStringList &list)
         pathToRemove += '/';
 
     QStringList selectiveSyncBlackList;
+    bool ok1 = true;
+    bool ok2 = true;
     if (parentInfo->_checked == Qt::PartiallyChecked) {
-        selectiveSyncBlackList = parentInfo->_folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList);
+        selectiveSyncBlackList = parentInfo->_folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList, &ok1);
     }
-    auto selectiveSyncUndecidedList = parentInfo->_folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncUndecidedList);
-    QVarLengthArray<int, 10> undecidedIndexes;
-    QVector<SubFolderInfo> newSubs;
+    auto selectiveSyncUndecidedList = parentInfo->_folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncUndecidedList, &ok2);
+
+    if( !(ok1 && ok2) ) {
+        qDebug() << Q_FUNC_INFO << "Could not retrieve selective sync info from journal";
+        return;
+    }
 
     std::set<QString> selectiveSyncUndecidedSet; // not QSet because it's not sorted
     foreach (const QString &str, selectiveSyncUndecidedList) {
@@ -573,10 +581,16 @@ void FolderStatusModel::slotUpdateDirectories(const QStringList &list)
         }
     }
 
-    newSubs.reserve(list.size() - 1);
-    for (int i = 1;  // skip the parent item (first in the list)
-            i < list.size(); ++i) {
-        const QString &path = list.at(i);
+    QStringList sortedSubfolders = list;
+    // skip the parent item (first in the list)
+    sortedSubfolders.erase(sortedSubfolders.begin());
+    sortedSubfolders.sort();
+
+    QVarLengthArray<int, 10> undecidedIndexes;
+
+    QVector<SubFolderInfo> newSubs;
+    newSubs.reserve(sortedSubfolders.size());
+    foreach (const QString& path, sortedSubfolders) {
         auto relativePath = path.mid(pathToRemove.size());
         if (parentInfo->_folder->isFileExcludedRelative(relativePath)) {
             continue;
@@ -724,7 +738,12 @@ void FolderStatusModel::slotApplySelectiveSync()
         }
         auto folder = _folders.at(i)._folder;
 
-        auto oldBlackList = folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList);
+        bool ok;
+        auto oldBlackList = folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList, &ok);
+        if( !ok ) {
+            qDebug() << Q_FUNC_INFO << "Could not read selective sync list from db.";
+            return;
+        }
         QStringList blackList = createBlackList(&_folders[i], oldBlackList);
         folder->journalDb()->setSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList, blackList);
 
@@ -734,12 +753,14 @@ void FolderStatusModel::slotApplySelectiveSync()
         // The folders that were undecided or blacklisted and that are now checked should go on the white list.
         // The user confirmed them already just now.
         QStringList toAddToWhiteList = ((oldBlackListSet + folder->journalDb()->getSelectiveSyncList(
-                SyncJournalDb::SelectiveSyncUndecidedList).toSet()) - blackListSet).toList();
+                SyncJournalDb::SelectiveSyncUndecidedList, &ok).toSet()) - blackListSet).toList();
 
         if (!toAddToWhiteList.isEmpty()) {
-            auto whiteList = folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList);
-            whiteList += toAddToWhiteList;
-            folder->journalDb()->setSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList, whiteList);
+            auto whiteList = folder->journalDb()->getSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList, &ok);
+            if (ok) {
+                whiteList += toAddToWhiteList;
+                folder->journalDb()->setSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList, whiteList);
+            }
         }
         // clear the undecided list
         folder->journalDb()->setSelectiveSyncList(SyncJournalDb::SelectiveSyncUndecidedList, QStringList());
@@ -803,10 +824,12 @@ void FolderStatusModel::slotSetProgress(const ProgressInfo &progress)
     auto *pi = &_folders[folderIndex]._progress;
 
     QVector<int> roles;
-    roles << FolderStatusDelegate::SyncProgressItemString << FolderStatusDelegate::WarningCount;
+    roles << FolderStatusDelegate::SyncProgressItemString
+          << FolderStatusDelegate::WarningCount
+          << Qt::ToolTipRole;
 
     if (!progress._currentDiscoveredFolder.isEmpty()) {
-        pi->_progressString = tr("Checking for changes in '%1'").arg(progress._currentDiscoveredFolder);
+        pi->_overallSyncString = tr("Checking for changes in '%1'").arg(progress._currentDiscoveredFolder);
         emit dataChanged(index(folderIndex), index(folderIndex), roles);
         return;
     }
@@ -911,11 +934,11 @@ void FolderStatusModel::slotSetProgress(const ProgressInfo &progress)
     if (totalSize > 0) {
         QString s1 = Utility::octetsToString( completedSize );
         QString s2 = Utility::octetsToString( totalSize );
-        //: Example text: "12 MB of 345 MB, file 6 of 7\nTotal time left 12 minutes"
-        overallSyncString = tr("%1 of %2, file %3 of %4\nTotal time left %5")
+        //: Example text: "5 minutes left, 12 MB of 345 MB, file 6 of 7"
+        overallSyncString = tr("%5 left, %1 of %2, file %3 of %4")
             .arg(s1, s2)
             .arg(currentFile).arg(totalFileCount)
-            .arg( Utility::durationToDescriptiveString(progress.totalProgress().estimatedEta) );
+            .arg( Utility::durationToDescriptiveString1(progress.totalProgress().estimatedEta) );
     } else if (totalFileCount > 0) {
         // Don't attempt to estimate the time left if there is no kb to transfer.
         overallSyncString = tr("file %1 of %2") .arg(currentFile).arg(totalFileCount);
@@ -963,10 +986,10 @@ void FolderStatusModel::slotFolderSyncStateChange(Folder *f)
             message = tr("Waiting for %n other folder(s)...", "", pos);
         }
         _folders[folderIndex]._progress = SubFolderInfo::Progress();
-        _folders[folderIndex]._progress._progressString = message;
+        _folders[folderIndex]._progress._overallSyncString = message;
     } else if (state == SyncResult::SyncPrepare) {
         _folders[folderIndex]._progress = SubFolderInfo::Progress();
-        _folders[folderIndex]._progress._progressString = tr("Preparing to sync...");
+        _folders[folderIndex]._progress._overallSyncString = tr("Preparing to sync...");
     } else if (state == SyncResult::Problem || state == SyncResult::Success) {
         // Reset the progress info after a sync.
         _folders[folderIndex]._progress = SubFolderInfo::Progress();
@@ -995,9 +1018,7 @@ void FolderStatusModel::slotFolderSyncStateChange(Folder *f)
 void FolderStatusModel::slotFolderScheduleQueueChanged()
 {
     // Update messages on waiting folders.
-    // It's ok to only update folders currently in the queue, because folders
-    // are only removed from the queue if they are deleted.
-    foreach (Folder* f, FolderMan::instance()->scheduleQueue()) {
+    foreach (Folder* f, FolderMan::instance()->map()) {
         slotFolderSyncStateChange(f);
     }
 }

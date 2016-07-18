@@ -52,15 +52,15 @@ extern "C" const char *csync_instruction_str(enum csync_instructions_e instr);
 
 namespace OCC {
 
-bool SyncEngine::_syncRunning = false;
+bool SyncEngine::s_anySyncRunning = false;
 
 qint64 SyncEngine::minimumFileAgeForUpload = 2000;
 
-SyncEngine::SyncEngine(AccountPtr account, CSYNC *ctx, const QString& localPath,
-                       const QString& remoteURL, const QString& remotePath, OCC::SyncJournalDb* journal)
+SyncEngine::SyncEngine(AccountPtr account, const QString& localPath,
+                       const QUrl& remoteURL, const QString& remotePath, OCC::SyncJournalDb* journal)
   : _account(account)
-  , _csync_ctx(ctx)
   , _needsUpdate(false)
+  , _syncRunning(false)
   , _localPath(localPath)
   , _remoteUrl(remoteURL)
   , _remotePath(remotePath)
@@ -68,6 +68,8 @@ SyncEngine::SyncEngine(AccountPtr account, CSYNC *ctx, const QString& localPath,
   , _progressInfo(new ProgressInfo)
   , _hasNoneFiles(false)
   , _hasRemoveFile(false)
+  , _hasForwardInTimeFiles(false)
+  , _backInTimeFiles(0)
   , _uploadLimit(0)
   , _downloadLimit(0)
   , _newBigFolderSizeLimit(-1)
@@ -77,12 +79,30 @@ SyncEngine::SyncEngine(AccountPtr account, CSYNC *ctx, const QString& localPath,
     qRegisterMetaType<SyncFileItem>("SyncFileItem");
     qRegisterMetaType<SyncFileItem::Status>("SyncFileItem::Status");
 
+    // We need to reconstruct the url because the path needs to be fully decoded, as csync will re-encode the path:
+    //  Remember that csync will just append the filename to the path and pass it to the vio plugin.
+    //  csync_owncloud will then re-encode everything.
+#if QT_VERSION >= QT_VERSION_CHECK(5, 0, 0)
+    QString url_string = _remoteUrl.scheme() + QLatin1String("://") + _remoteUrl.authority(QUrl::EncodeDelimiters) + _remoteUrl.path(QUrl::FullyDecoded);
+#else
+    // Qt4 was broken anyway as it did not encode the '#' as it should have done  (it was actually a problem when parsing the path from QUrl::setPath
+    QString url_string = _remoteUrl.toString();
+#endif
+    url_string = Utility::toCSyncScheme(url_string);
+
+    csync_create(&_csync_ctx, localPath.toUtf8().data(), url_string.toUtf8().data());
+    csync_init(_csync_ctx);
+    _excludedFiles.reset(new ExcludedFiles(&_csync_ctx->excludes));
+    _syncFileStatusTracker.reset(new SyncFileStatusTracker(this));
+
     _thread.setObjectName("SyncEngine_Thread");
-    _thread.start();
 }
 
 SyncEngine::~SyncEngine()
 {
+    abort();
+    _excludedFiles.reset();
+    csync_destroy(_csync_ctx);
     _thread.quit();
     _thread.wait();
 }
@@ -183,6 +203,12 @@ QString SyncEngine::csyncErrorToString(CSYNC_STATUS err)
 
 }
 
+/**
+ * Check if the item is in the blacklist.
+ * If it should not be sync'ed because of the blacklist, update the item with the error instruction
+ * and proper error message, and return true.
+ * If the item is not in the blacklist, or the blacklist is stale, return false.
+ */
 bool SyncEngine::checkErrorBlacklisting( SyncFileItem &item )
 {
     if( !_journal ) {
@@ -213,6 +239,9 @@ bool SyncEngine::checkErrorBlacklisting( SyncFileItem &item )
             return false;
         } else if( item._modtime != entry._lastTryModtime ) {
             qDebug() << item._file << " is blacklisted, but has changed mtime!";
+            return false;
+        } else if( item._renameTarget != entry._renameTarget) {
+            qDebug() << item._file << " is blacklisted, but rename target changed from" << entry._renameTarget;
             return false;
         }
     } else if( item._direction == SyncFileItem::Down ) {
@@ -408,7 +437,7 @@ int SyncEngine::treewalkFile( TREE_WALK_FILE *file, bool remote )
         item->_errorString = tr("Filename is too long.");
         break;
     case CSYNC_STATUS_INDIVIDUAL_EXCLUDE_HIDDEN:
-        item->_errorString = tr("File is ignored because it's hidden.");
+        item->_errorString = tr("File/Folder is ignored because it's hidden.");
         break;
     case CYSNC_STATUS_FILE_LOCKED_OR_OPEN:
         item->_errorString = QLatin1String("File locked"); // don't translate, internal use!
@@ -494,10 +523,12 @@ int SyncEngine::treewalkFile( TREE_WALK_FILE *file, bool remote )
             // Even if the mtime is different on the server, we always want to keep the mtime from
             // the file system in the DB, this is to avoid spurious upload on the next sync
             item->_modtime = file->other.modtime;
+            // same for the size
+            item->_size = file->other.size;
 
             // If the 'W' remote permission changed, update the local filesystem
             SyncJournalFileRecord prev = _journal->getFileRecord(item->_file);
-            if (prev._remotePerm.contains('W') != item->_remotePerm.contains('W')) {
+            if (prev.isValid() && prev._remotePerm.contains('W') != item->_remotePerm.contains('W')) {
                 const bool isReadOnly = !item->_remotePerm.contains('W');
                 FileSystem::setFileReadOnlyWeak(filePath, isReadOnly);
             }
@@ -517,12 +548,13 @@ int SyncEngine::treewalkFile( TREE_WALK_FILE *file, bool remote )
         bool directoryEtagUpdate = isDirectory && file->should_update_metadata;
         bool localMetadataUpdate = !remote && file->should_update_metadata;
         if (!directoryEtagUpdate) {
+            item->_isDirectory = isDirectory;
             if (localMetadataUpdate) {
                 // Hack, we want a local metadata update to happen, but only if the
                 // remote tree doesn't ask us to do some kind of propagation.
-                item->_isDirectory = isDirectory;
                 _syncItemMap.insert(key, item);
             }
+            emit syncItemDiscovered(*item);
             return re;
         }
         break;
@@ -542,18 +574,28 @@ int SyncEngine::treewalkFile( TREE_WALK_FILE *file, bool remote )
     case CSYNC_INSTRUCTION_ERROR:
         dir = SyncFileItem::None;
         break;
-    case CSYNC_INSTRUCTION_EVAL:
-    case CSYNC_INSTRUCTION_NEW:
     case CSYNC_INSTRUCTION_TYPE_CHANGE:
     case CSYNC_INSTRUCTION_SYNC:
-    case CSYNC_INSTRUCTION_STAT_ERROR:
-    default:
-        dir = remote ? SyncFileItem::Down : SyncFileItem::Up;
-        if (!remote && file->instruction == CSYNC_INSTRUCTION_SYNC) {
+        if (!remote) {
             // An upload of an existing file means that the file was left unchanged on the server
             // This counts as a NONE for detecting if all the files on the server were changed
             _hasNoneFiles = true;
+        } else if (!isDirectory) {
+            if (std::difftime(file->modtime, file->other.modtime) < 0) {
+                // We are going back on time
+                _backInTimeFiles++;
+                qDebug() << file->path << "has a timestamp earlier than the local file";
+            } else {
+                _hasForwardInTimeFiles = true;
+            }
         }
+        dir = remote ? SyncFileItem::Down : SyncFileItem::Up;
+        break;
+    case CSYNC_INSTRUCTION_NEW:
+    case CSYNC_INSTRUCTION_EVAL:
+    case CSYNC_INSTRUCTION_STAT_ERROR:
+    default:
+        dir = remote ? SyncFileItem::Down : SyncFileItem::Up;
         break;
     }
 
@@ -634,10 +676,13 @@ void SyncEngine::startSync()
         }
     }
 
+    Q_ASSERT(!s_anySyncRunning);
     Q_ASSERT(!_syncRunning);
+    s_anySyncRunning = true;
     _syncRunning = true;
+    _anotherSyncNeeded = false;
 
-    Q_ASSERT(_csync_ctx);
+    _progressInfo->reset();
 
     if (!QDir(_localPath).exists()) {
         // No _tr, it should only occur in non-mirall
@@ -699,10 +744,17 @@ void SyncEngine::startSync()
     // thereby speeding up the initial discovery significantly.
     _csync_ctx->db_is_empty = (fileRecordCount == 0);
 
-    auto selectiveSyncBlackList = _journal->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList);
-    bool usingSelectiveSync = (!selectiveSyncBlackList.isEmpty());
-    qDebug() << (usingSelectiveSync ? "====Using Selective Sync" : "====NOT Using Selective Sync");
-
+    bool ok;
+    auto selectiveSyncBlackList = _journal->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList, &ok);
+    if (ok) {
+        bool usingSelectiveSync = (!selectiveSyncBlackList.isEmpty());
+        qDebug() << Q_FUNC_INFO << (usingSelectiveSync ? "====Using Selective Sync" : "====NOT Using Selective Sync");
+    } else {
+        qDebug() << Q_FUNC_INFO << "Could not retrieve selective sync list from DB";
+        emit csyncError(tr("Unable to read the blacklist from the local database"));
+        finalize(false);
+        return;
+    }
     csync_set_userdata(_csync_ctx, this);
 
     // Set up checksumming hook
@@ -713,6 +765,7 @@ void SyncEngine::startSync()
 
     qDebug() << "#### Discovery start #################################################### >>";
 
+    _thread.start();
     _discoveryMainThread = new DiscoveryMainThread(account());
     _discoveryMainThread->setParent(this);
     connect(this, SIGNAL(finished(bool)), _discoveryMainThread, SLOT(deleteLater()));
@@ -727,7 +780,15 @@ void SyncEngine::startSync()
     DiscoveryJob *discoveryJob = new DiscoveryJob(_csync_ctx);
     discoveryJob->_selectiveSyncBlackList = selectiveSyncBlackList;
     discoveryJob->_selectiveSyncWhiteList =
-        _journal->getSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList);
+        _journal->getSelectiveSyncList(SyncJournalDb::SelectiveSyncWhiteList, &ok);
+    if (!ok) {
+        delete discoveryJob;
+        qDebug() << Q_FUNC_INFO << "Unable to read selective sync list, aborting.";
+        emit csyncError(tr("Unable to read from the sync journal."));
+        finalize(false);
+        return;
+    }
+
     discoveryJob->_newBigFolderSizeLimit = _newBigFolderSizeLimit;
     discoveryJob->moveToThread(&_thread);
     connect(discoveryJob, SIGNAL(finished(int)), this, SLOT(slotDiscoveryJobFinished(int)));
@@ -829,18 +890,6 @@ void SyncEngine::slotDiscoveryJobFinished(int discoveryResult)
         }
     }
 
-    // Sort items per destination
-    std::sort(_syncedItems.begin(), _syncedItems.end());
-
-    // make sure everything is allowed
-    checkForPermission();
-
-    // To announce the beginning of the sync
-    emit aboutToPropagate(_syncedItems);
-    // it's important to do this before ProgressInfo::start(), to announce start of new sync
-    emit transmissionProgress(*_progressInfo);
-    _progressInfo->start();
-
     if (!_hasNoneFiles && _hasRemoveFile) {
         qDebug() << Q_FUNC_INFO << "All the files are going to be changed, asking the user";
         bool cancel = false;
@@ -851,6 +900,27 @@ void SyncEngine::slotDiscoveryJobFinished(int discoveryResult)
             return;
         }
     }
+    if (!_hasForwardInTimeFiles && _backInTimeFiles >= 2) {
+        qDebug() << "All the changes are bringing files in the past, asking the user";
+        // this typically happen when a backup is restored on the server
+        bool restore = false;
+        emit aboutToRestoreBackup(&restore);
+        if (restore) {
+            restoreOldFiles();
+        }
+    }
+
+    // Sort items per destination
+    std::sort(_syncedItems.begin(), _syncedItems.end());
+
+    // make sure everything is allowed
+    checkForPermission();
+
+    // To announce the beginning of the sync
+    emit aboutToPropagate(_syncedItems);
+    // it's important to do this before ProgressInfo::start(), to announce start of new sync
+    emit transmissionProgress(*_progressInfo);
+    _progressInfo->startEstimateUpdates();
 
     // post update phase script: allow to tweak stuff by a custom script in debug mode.
     if( !qgetenv("OWNCLOUD_POST_UPDATE_SCRIPT").isEmpty() ) {
@@ -868,12 +938,13 @@ void SyncEngine::slotDiscoveryJobFinished(int discoveryResult)
     _journal->commit("post treewalk");
 
     _propagator = QSharedPointer<OwncloudPropagator>(
-        new OwncloudPropagator (_account, _localPath, _remoteUrl, _remotePath, _journal));
+        new OwncloudPropagator (_account, _localPath, _remoteUrl.path(), _remotePath, _journal));
     connect(_propagator.data(), SIGNAL(itemCompleted(const SyncFileItem &, const PropagatorJob &)),
             this, SLOT(slotItemCompleted(const SyncFileItem &, const PropagatorJob &)));
     connect(_propagator.data(), SIGNAL(progress(const SyncFileItem &,quint64)),
             this, SLOT(slotProgress(const SyncFileItem &,quint64)));
     connect(_propagator.data(), SIGNAL(finished()), this, SLOT(slotFinished()), Qt::QueuedConnection);
+    connect(_propagator.data(), SIGNAL(seenLockedFile(QString)), SIGNAL(seenLockedFile(QString)));
 
     // apply the network limits to the propagator
     setNetworkLimits(_uploadLimit, _downloadLimit);
@@ -959,10 +1030,12 @@ void SyncEngine::finalize(bool success)
     _thread.wait();
 
     csync_commit(_csync_ctx);
+    _journal->close();
 
     qDebug() << "CSync run took " << _stopWatch.addLapTime(QLatin1String("Sync Finished"));
     _stopWatch.stop();
 
+    s_anySyncRunning = false;
     _syncRunning = false;
     emit finished(success);
 
@@ -997,7 +1070,8 @@ QString SyncEngine::adjustRenamedPath(const QString& original)
  */
 void SyncEngine::checkForPermission()
 {
-    auto selectiveSyncBlackList = _journal->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList);
+    bool selectiveListOk;
+    auto selectiveSyncBlackList = _journal->getSelectiveSyncList(SyncJournalDb::SelectiveSyncBlackList, &selectiveListOk);
     std::sort(selectiveSyncBlackList.begin(), selectiveSyncBlackList.end());
 
     for (SyncFileItemVector::iterator it = _syncedItems.begin(); it != _syncedItems.end(); ++it) {
@@ -1008,7 +1082,9 @@ void SyncEngine::checkForPermission()
 
         // Do not propagate anything in the server if it is in the selective sync blacklist
         const QString path = (*it)->destination() + QLatin1Char('/');
-        if (std::binary_search(selectiveSyncBlackList.constBegin(), selectiveSyncBlackList.constEnd(),
+
+        // if reading the selective sync list from db failed, lets ignore all rather than nothing.
+        if (!selectiveListOk || std::binary_search(selectiveSyncBlackList.constBegin(), selectiveSyncBlackList.constEnd(),
                                 path)) {
             (*it)->_instruction = CSYNC_INSTRUCTION_IGNORE;
             (*it)->_status = SyncFileItem::FileIgnored;
@@ -1040,8 +1116,17 @@ void SyncEngine::checkForPermission()
                     (*it)->_status = SyncFileItem::NormalError;
                     (*it)->_errorString = tr("Not allowed because you don't have permission to add subfolders to that folder");
 
-                    for (SyncFileItemVector::iterator it_next = it + 1; it_next != _syncedItems.end() && (*it_next)->_file.startsWith(path); ++it_next) {
+                    for (SyncFileItemVector::iterator it_next = it + 1; it_next != _syncedItems.end() && (*it_next)->destination().startsWith(path); ++it_next) {
                         it = it_next;
+                        if ((*it)->_instruction == CSYNC_INSTRUCTION_RENAME) {
+                            // The file was most likely moved in this directory.
+                            // If the file was read only or could not be moved or removed, it should
+                            // be restored. Do that in the next sync by not considering as a rename
+                            // but delete and upload. It will then be restored if needed.
+                            _journal->avoidRenamesOnNextSync((*it)->_file);
+                            _anotherSyncNeeded = true;
+                            qDebug() << "Moving of " << (*it)->_file << " canceled because no permission to add parent folder";
+                        }
                         (*it)->_instruction = CSYNC_INSTRUCTION_ERROR;
                         (*it)->_status = SyncFileItem::NormalError;
                         (*it)->_errorString = tr("Not allowed because you don't have permission to add parent folder");
@@ -1170,15 +1255,18 @@ void SyncEngine::checkForPermission()
                     }
                 }
 
-#if 0 /* We don't like the idea of renaming behind user's back, as the user may be working with the files */
-
-                if (!sourceOK && !destinationOK) {
+#ifdef OWNCLOUD_RESTORE_RENAME /* We don't like the idea of renaming behind user's back, as the user may be working with the files */
+                if (!sourceOK && (!destinationOK || isRename)
+                        // (not for directory because that's more complicated with the contents that needs to be adjusted)
+                        && !(*it)->_isDirectory) {
                     // Both the source and the destination won't allow move.  Move back to the original
                     std::swap((*it)->_file, (*it)->_renameTarget);
                     (*it)->_direction = SyncFileItem::Down;
                     (*it)->_errorString = tr("Move not allowed, item restored");
                     (*it)->_isRestoration = true;
                     qDebug() << "checkForPermission: MOVING BACK" << (*it)->_file;
+                    // in case something does wrong, we will not do it next time
+                    _journal->avoidRenamesOnNextSync((*it)->_file);
                 } else
 #endif
                 if (!sourceOK || !destinationOK) {
@@ -1230,33 +1318,48 @@ QByteArray SyncEngine::getPermissions(const QString& file) const
     return _remotePerms.value(file);
 }
 
-bool SyncEngine::estimateState(QString fn, csync_ftw_type_e t, SyncFileStatus* s)
+void SyncEngine::restoreOldFiles()
 {
-    Q_UNUSED(t);
-    QString pat(fn);
-    if( t == CSYNC_FTW_TYPE_DIR && ! fn.endsWith(QLatin1Char('/'))) {
-        pat.append(QLatin1Char('/'));
-    }
+    /* When the server is trying to send us lots of file in the past, this means that a backup
+       was restored in the server.  In that case, we should not simply overwrite the newer file
+       on the file system with the older file from the backup on the server. Instead, we will
+       upload the client file. But we still downloaded the old file in a conflict file just in case
+    */
 
-    Q_FOREACH(const SyncFileItemPtr &item, _syncedItems) {
-        //qDebug() << Q_FUNC_INFO << fn << item->_status << item->_file << fn.startsWith(item->_file) << item->_file.startsWith(fn);
+    for (auto it = _syncedItems.begin(); it != _syncedItems.end(); ++it) {
+        if ((*it)->_direction != SyncFileItem::Down)
+            continue;
 
-        if (item->_file.startsWith(pat) ||
-                item->_file == fn || item->_renameTarget == fn /* the same directory or file */) {
-            if (item->_status == SyncFileItem::NormalError
-                || item->_status == SyncFileItem::FatalError)
-                s->set(SyncFileStatus::STATUS_ERROR);
-            else if (item->_status == SyncFileItem::FileIgnored)
-                s->set(SyncFileStatus::STATUS_IGNORE);
-            else if (item->_status == SyncFileItem::Success)
-                s->set(SyncFileStatus::STATUS_UPDATED);
-            else
-                s->set(SyncFileStatus::STATUS_EVAL);
-            qDebug() << Q_FUNC_INFO << "Setting" << fn << "to" << s->toSocketAPIString();
-            return true;
+        switch ((*it)->_instruction) {
+        case CSYNC_INSTRUCTION_SYNC:
+            qDebug() << "restoreOldFiles: RESTORING" << (*it)->_file;
+            (*it)->_instruction = CSYNC_INSTRUCTION_CONFLICT;
+            break;
+        case CSYNC_INSTRUCTION_REMOVE:
+            qDebug() << "restoreOldFiles: RESTORING" << (*it)->_file;
+            (*it)->_should_update_metadata = true;
+            (*it)->_instruction = CSYNC_INSTRUCTION_NEW;
+            (*it)->_direction = SyncFileItem::Up;
+            break;
+        case CSYNC_INSTRUCTION_RENAME:
+        case CSYNC_INSTRUCTION_NEW:
+            // Ideally we should try to revert the rename or remove, but this would be dangerous
+            // without re-doing the reconcile phase.  So just let it happen.
+            break;
+        default:
+            break;
         }
     }
-    return false;
+}
+
+SyncFileItem* SyncEngine::findSyncItem(const QString &fileName) const
+{
+    Q_FOREACH(const SyncFileItemPtr &item, _syncedItems) {
+        // Directories will appear in this list as well, and will get their status set once all children have been propagated
+        if ((item->_file == fileName || (!item->_renameTarget.isEmpty() && item->_renameTarget == fileName)))
+            return item.data();
+    }
+    return 0;
 }
 
 qint64 SyncEngine::timeSinceFileTouched(const QString& fn) const

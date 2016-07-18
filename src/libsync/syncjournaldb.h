@@ -38,7 +38,10 @@ class OWNCLOUDSYNC_EXPORT SyncJournalDb : public QObject
 public:
     explicit SyncJournalDb(const QString& path, QObject *parent = 0);
     virtual ~SyncJournalDb();
-    SyncJournalFileRecord getFileRecord( const QString& filename );
+
+    // to verify that the record could be queried successfully check
+    // with SyncJournalFileRecord::isValid()
+    SyncJournalFileRecord getFileRecord(const QString& filename);
     bool setFileRecord( const SyncJournalFileRecord& record );
 
     /// Like setFileRecord, but preserves checksums
@@ -113,7 +116,7 @@ public:
         SelectiveSyncUndecidedList = 3
     };
     /* return the specified list from the database */
-    QStringList getSelectiveSyncList(SelectiveSyncListType type);
+    QStringList getSelectiveSyncList(SelectiveSyncListType type, bool *ok);
     /* Write the selective sync list (remove all other entries of that list */
     void setSelectiveSyncList(SelectiveSyncListType type, const QStringList &list);
 

@@ -40,7 +40,6 @@ Account::Account(QObject *parent)
     , _capabilities(QVariantMap())
     , _am(0)
     , _credentials(0)
-    , _treatSslErrorsAsFailure(false)
     , _davPath( Theme::instance()->webDavPath() )
     , _wasMigrated(false)
 {
@@ -239,6 +238,15 @@ QNetworkReply *Account::getRequest(const QUrl &url)
     return _am->get(request);
 }
 
+QNetworkReply *Account::deleteRequest( const QUrl &url)
+{
+    QNetworkRequest request(url);
+#if QT_VERSION > QT_VERSION_CHECK(4, 8, 4)
+    request.setSslConfiguration(this->getOrCreateSslConfig());
+#endif
+    return _am->deleteResource(request);
+}
+
 QNetworkReply *Account::davRequest(const QByteArray &verb, const QString &relPath, QNetworkRequest req, QIODevice *data)
 {
     return davRequest(verb, concatUrlPath(davUrl(), relPath), req, data);
@@ -320,9 +328,9 @@ void Account::addApprovedCerts(const QList<QSslCertificate> certs)
     _approvedCerts += certs;
 }
 
-void Account::resetSslCertErrorState()
+void Account::resetRejectedCertificates()
 {
-    _treatSslErrorsAsFailure = false;
+    _rejectedCertificates.clear();
 }
 
 void Account::setSslErrorHandler(AbstractSslErrorHandler *handler)
@@ -403,8 +411,15 @@ void Account::slotHandleSslErrors(QNetworkReply *reply , QList<QSslError> errors
                      << error.errorString() << "("<< error.error() << ")" << "\n";
     }
 
-    if( _treatSslErrorsAsFailure ) {
-        // User decided once not to trust. Honor this decision.
+    bool allPreviouslyRejected = true;
+    foreach (const QSslError &error, errors) {
+        if (!_rejectedCertificates.contains(error.certificate())) {
+            allPreviouslyRejected = false;
+        }
+    }
+
+    // If all certs have previously been rejected by the user, don't ask again.
+    if( allPreviouslyRejected ) {
         qDebug() << out << "Certs not trusted by user decision, returning.";
         return;
     }
@@ -418,7 +433,7 @@ void Account::slotHandleSslErrors(QNetworkReply *reply , QList<QSslError> errors
     if (_sslErrorHandler->handleErrors(errors, reply->sslConfiguration(), &approvedCerts, sharedFromThis())) {
         QSslSocket::addDefaultCaCertificates(approvedCerts);
         addApprovedCerts(approvedCerts);
-        emit wantsAccountSaved(sharedFromThis());
+        emit wantsAccountSaved(this);
         // all ssl certs are known and accepted. We can ignore the problems right away.
 //         qDebug() << out << "Certs are known and trusted! This is not an actual error.";
 
@@ -427,7 +442,12 @@ void Account::slotHandleSslErrors(QNetworkReply *reply , QList<QSslError> errors
         // certificate changes.
         reply->ignoreSslErrors(errors);
     } else {
-        _treatSslErrorsAsFailure = true;
+        // Mark all involved certificates as rejected, so we don't ask the user again.
+        foreach (const QSslError &error, errors) {
+            if (!_rejectedCertificates.contains(error.certificate())) {
+                _rejectedCertificates.append(error.certificate());
+            }
+        }
         // if during normal operation, a new certificate was MITM'ed, and the user does not
         // ACK it, the running request must be aborted and the QNAM must be reset, to not
         // treat the new cert as granted. See bug #3283
@@ -472,23 +492,38 @@ void Account::setCapabilities(const QVariantMap &caps)
     _capabilities = Capabilities(caps);
 }
 
-QString Account::serverVersion()
+QString Account::serverVersion() const
 {
     return _serverVersion;
 }
 
-int Account::serverVersionInt()
+int Account::serverVersionInt() const
 {
     // FIXME: Use Qt 5.5 QVersionNumber
     auto components = serverVersion().split('.');
     return  (components.value(0).toInt() << 16)
                    + (components.value(1).toInt() << 8)
-                   + components.value(2).toInt();
+            + components.value(2).toInt();
+}
+
+bool Account::serverVersionUnsupported() const
+{
+    if (serverVersionInt() == 0) {
+        // not detected yet, assume it is fine.
+        return false;
+    }
+    return serverVersionInt() < 0x070000;
 }
 
 void Account::setServerVersion(const QString& version)
 {
+    if (version == _serverVersion) {
+        return;
+    }
+
+    auto oldServerVersion = _serverVersion;
     _serverVersion = version;
+    emit serverVersionChanged(this, oldServerVersion, version);
 }
 
 bool Account::rootEtagChangesNotOnlySubFolderEtags()

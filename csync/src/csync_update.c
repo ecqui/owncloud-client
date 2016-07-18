@@ -245,33 +245,9 @@ static int _csync_detect_update(CSYNC *ctx, const char *file,
   st->etag = NULL;
   st->child_modified = 0;
   st->has_ignored_files = 0;
-
-  /* FIXME: Under which conditions are the following two ifs true and the code
-   * is executed? */
   if (type == CSYNC_FTW_TYPE_FILE ) {
     if (fs->mtime == 0) {
       CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s - mtime is zero!", path);
-
-      tmp = csync_statedb_get_stat_by_hash(ctx, h);
-      if(_last_db_return_error(ctx)) {
-          SAFE_FREE(st);
-          SAFE_FREE(tmp);
-          ctx->status_code = CSYNC_STATUS_UNSUCCESSFUL;
-          return -1;
-      }
-
-      if (tmp == NULL) {
-        CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s - not found in db, IGNORE!", path);
-        st->instruction = CSYNC_INSTRUCTION_IGNORE;
-      } else {
-        SAFE_FREE(st);
-        st = tmp;
-        st->instruction = CSYNC_INSTRUCTION_NONE;
-        CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s - tmp non zero, mtime %lu", path, st->modtime );
-        tmp = NULL;
-      }
-      goto fastout; /* Skip copying of the etag. That's an important difference to upstream
-                     * without etags. */
     }
   }
 
@@ -294,6 +270,7 @@ static int _csync_detect_update(CSYNC *ctx, const char *file,
 
     if(_last_db_return_error(ctx)) {
         SAFE_FREE(st);
+        SAFE_FREE(tmp);
         ctx->status_code = CSYNC_STATUS_UNSUCCESSFUL;
         return -1;
     }
@@ -321,7 +298,10 @@ static int _csync_detect_update(CSYNC *ctx, const char *file,
                  // zero size in statedb can happen during migration
                  || (tmp->size != 0 && fs->size != tmp->size))) {
 
-            if (fs->size == tmp->size && tmp->checksumTypeId) {
+            // Checksum comparison at this stage is only enabled for .eml files,
+            // check #4754 #4755
+            bool isEmlFile = csync_fnmatch("*.eml", file, FNM_CASEFOLD) == 0;
+            if (isEmlFile && fs->size == tmp->size && tmp->checksumTypeId) {
                 if (ctx->callbacks.checksum_hook) {
                     st->checksum = ctx->callbacks.checksum_hook(
                                 file, tmp->checksumTypeId,
@@ -333,6 +313,7 @@ static int _csync_detect_update(CSYNC *ctx, const char *file,
                     checksumIdentical = strncmp(st->checksum, tmp->checksum, 1000) == 0;
                 }
                 if (checksumIdentical) {
+                    CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "NOTE: Checksums are identical, file did not actually change: %s", path);
                     st->instruction = CSYNC_INSTRUCTION_NONE;
                     st->should_update_metadata = true;
                     goto out;
@@ -401,24 +382,41 @@ static int _csync_detect_update(CSYNC *ctx, const char *file,
                 tmp_vio_type = CSYNC_VIO_FILE_TYPE_UNKNOWN;
             }
 
-            if (tmp && tmp->inode == fs->inode && tmp_vio_type == fs->type
+            // Default to NEW unless we're sure it's a rename.
+            st->instruction = CSYNC_INSTRUCTION_NEW;
+
+            bool isRename =
+                tmp && tmp->inode == fs->inode && tmp_vio_type == fs->type
                     && (tmp->modtime == fs->mtime || fs->type == CSYNC_VIO_FILE_TYPE_DIRECTORY)
 #ifdef NO_RENAME_EXTENSION
                     && _csync_sameextension(tmp->path, path)
 #endif
-               ) {
+                ;
+
+
+            // Verify the checksum where possible
+            if (isRename && tmp->checksumTypeId && ctx->callbacks.checksum_hook
+                    && fs->type == CSYNC_VIO_FILE_TYPE_REGULAR) {
+                st->checksum = ctx->callbacks.checksum_hook(
+                            file, tmp->checksumTypeId,
+                            ctx->callbacks.checksum_userdata);
+                if (st->checksum) {
+                    CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "checking checksum of potential rename %s %s <-> %s", path, st->checksum, tmp->checksum);
+                    st->checksumTypeId = tmp->checksumTypeId;
+                    isRename = strncmp(st->checksum, tmp->checksum, 1000) == 0;
+                }
+            }
+
+            if (isRename) {
                 CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "pot rename detected based on inode # %" PRId64 "", (uint64_t) fs->inode);
                 /* inode found so the file has been renamed */
                 st->instruction = CSYNC_INSTRUCTION_EVAL_RENAME;
                 if (fs->type == CSYNC_VIO_FILE_TYPE_DIRECTORY) {
                     csync_rename_record(ctx, tmp->path, path);
                 }
-                goto out;
-            } else {
-                /* file not found in statedb */
-                st->instruction = CSYNC_INSTRUCTION_NEW;
-                goto out;
             }
+            goto out;
+
         } else {
             /* Remote Replica Rename check */
             tmp = csync_statedb_get_stat_by_file_id(ctx, fs->file_id);
@@ -518,7 +516,6 @@ out:
       strncpy(st->remotePerm, fs->remotePerm, REMOTE_PERM_BUF_SIZE);
   }
 
-fastout:  /* target if the file information is read from database into st */
   st->phash = h;
   st->pathlen = len;
   memcpy(st->path, (len ? path : ""), len + 1);
@@ -563,7 +560,11 @@ int csync_walker(CSYNC *ctx, const char *file, const csync_vio_file_stat_t *fs,
   switch (flag) {
     case CSYNC_FTW_FLAG_FILE:
       if (ctx->current == REMOTE_REPLICA) {
-        CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s [file_id=%s size=%" PRIu64 "]", file, fs->file_id, fs->size);
+          if (fs->fields & CSYNC_VIO_FILE_STAT_FIELDS_SIZE) {
+              CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s [file_id=%s size=%" PRIu64 "]", file, fs->file_id, fs->size);
+          } else {
+              CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s [file_id=%s size=UNKNOWN]", file, fs->file_id);
+          }
       } else {
           CSYNC_LOG(CSYNC_LOG_PRIORITY_TRACE, "file: %s [inode=%" PRIu64 " size=%" PRIu64 "]", file, fs->inode, fs->size);
       }

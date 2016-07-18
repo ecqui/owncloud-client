@@ -258,8 +258,12 @@ static csync_vio_file_stat_t* propertyMapToFileStat(const QMap<QString,QString> 
             file_stat->mtime = oc_httpdate_parse(value.toUtf8());
             file_stat->fields |= CSYNC_VIO_FILE_STAT_FIELDS_MTIME;
         } else if (property == "getcontentlength") {
-            file_stat->size = value.toLongLong();
-            file_stat->fields |= CSYNC_VIO_FILE_STAT_FIELDS_SIZE;
+            bool ok = false;
+            qlonglong ll = value.toLongLong(&ok);
+            if (ok && ll >= 0) {
+                file_stat->size = ll;
+                file_stat->fields |= CSYNC_VIO_FILE_STAT_FIELDS_SIZE;
+            }
         } else if (property == "getetag") {
             file_stat->etag = csync_normalize_etag(value.toUtf8());
             file_stat->fields |= CSYNC_VIO_FILE_STAT_FIELDS_ETAG;
@@ -485,7 +489,7 @@ void DiscoveryMainThread::doGetSizeSlot(const QString& path, qint64* result)
 
     // Schedule the DiscoverySingleDirectoryJob
     auto propfindJob = new PropfindJob(_account, fullPath, this);
-    propfindJob->setProperties(QList<QByteArray>() << "resourcetype" << "quota-used-bytes");
+    propfindJob->setProperties(QList<QByteArray>() << "resourcetype" << "http://owncloud.org/ns:size");
     QObject::connect(propfindJob, SIGNAL(finishedWithError()),
                      this, SLOT(slotGetSizeFinishedWithError()));
     QObject::connect(propfindJob, SIGNAL(result(QVariantMap)),
@@ -513,7 +517,7 @@ void DiscoveryMainThread::slotGetSizeResult(const QVariantMap &map)
         return; // possibly aborted
     }
 
-    *_currentGetSizeResult = map.value(QLatin1String("quota-used-bytes")).toLongLong();
+    *_currentGetSizeResult = map.value(QLatin1String("size")).toLongLong();
     qDebug() << "Size of folder:" << *_currentGetSizeResult;
     _currentGetSizeResult = 0;
     QMutexLocker locker(&_discoveryJob->_vioMutex);

@@ -40,11 +40,6 @@ namespace Utility
     OWNCLOUDSYNC_EXPORT void setLaunchOnStartup(const QString &appName, const QString& guiName, bool launch);
     OWNCLOUDSYNC_EXPORT qint64 freeDiskSpace(const QString &path);
     OWNCLOUDSYNC_EXPORT QString toCSyncScheme(const QString &urlStr);
-    /** Like QLocale::toString(double, 'f', prec), but drops trailing zeros after the decimal point */
-
-    OWNCLOUDSYNC_EXPORT bool doesSetContainPrefix(const QSet<QString> &l, const QString &p);
-
-
 
     /**
      * @brief compactFormatDouble - formats a double value human readable.
@@ -67,8 +62,15 @@ namespace Utility
      * @brief Convert milliseconds duration to human readable string.
      * @param quint64 msecs the milliseconds to convert to string.
      * @return an HMS representation of the milliseconds value.
+     *
+     * durationToDescriptiveString1 describes the duration in a single
+     * unit, like "5 minutes" or "2 days".
+     *
+     * durationToDescriptiveString2 uses two units where possible, so
+     * "5 minutes 43 seconds" or "1 month 3 days".
      */
-    OWNCLOUDSYNC_EXPORT QString durationToDescriptiveString(quint64 msecs);
+    OWNCLOUDSYNC_EXPORT QString durationToDescriptiveString1(quint64 msecs);
+    OWNCLOUDSYNC_EXPORT QString durationToDescriptiveString2(quint64 msecs);
 
     /**
      * @brief hasDarkSystray - determines whether the systray is dark or light.

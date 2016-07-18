@@ -71,28 +71,39 @@ bool Capabilities::shareResharing() const
     return _capabilities["files_sharing"].toMap()["resharing"].toBool();
 }
 
-QList<QByteArray> Capabilities::supportedChecksumTypesAdvertised() const
+bool Capabilities::notificationsAvailable() const
 {
-    return QList<QByteArray>();
+    return _capabilities.contains("notifications");
+}
+
+bool Capabilities::isValid() const
+{
+    return !_capabilities.isEmpty();
 }
 
 QList<QByteArray> Capabilities::supportedChecksumTypes() const
 {
-    auto list = supportedChecksumTypesAdvertised();
-    QByteArray cfgType = ConfigFile().transmissionChecksum().toLatin1();
-    if (!cfgType.isEmpty()) {
-        list.prepend(cfgType);
+    QList<QByteArray> list;
+    foreach (const auto & t, _capabilities["checksums"].toMap()["supportedTypes"].toList()) {
+        list.push_back(t.toByteArray());
     }
     return list;
 }
 
-QByteArray Capabilities::preferredChecksumType() const
+QByteArray Capabilities::preferredUploadChecksumType() const
 {
-    auto list = supportedChecksumTypes();
-    if (list.isEmpty()) {
-        return QByteArray();
-    }
-    return list.first();
+    return _capabilities["checksums"].toMap()["preferredUploadType"].toByteArray();
+}
+
+QByteArray Capabilities::uploadChecksumType() const
+{
+    QByteArray preferred = preferredUploadChecksumType();
+    if (!preferred.isEmpty())
+        return preferred;
+    QList<QByteArray> supported = supportedChecksumTypes();
+    if (!supported.isEmpty())
+        return supported.first();
+    return QByteArray();
 }
 
 }

@@ -32,6 +32,7 @@ set(client_UI
     owncloudsetuppage.ui
     addcertificatedialog.ui
     proxyauthdialog.ui
+    notificationwidget.ui
     wizard/owncloudadvancedsetuppage.ui
     wizard/owncloudconnectionmethoddialog.ui
     wizard/owncloudhttpcredspage.ui
@@ -53,6 +54,7 @@ set(client_SRCS
     folderwizard.cpp
     generalsettings.cpp
     ignorelisteditor.cpp
+    lockwatcher.cpp
     logbrowser.cpp
     networksettings.cpp
     ocsjob.cpp
@@ -62,6 +64,8 @@ set(client_SRCS
     owncloudgui.cpp
     owncloudsetupwizard.cpp
     protocolwidget.cpp
+    activitydata.cpp
+    activitylistmodel.cpp
     activitywidget.cpp
     activityitemdelegate.cpp
     selectivesyncdialog.cpp
@@ -84,11 +88,16 @@ set(client_SRCS
     proxyauthhandler.cpp
     proxyauthdialog.cpp
     synclogdialog.cpp
+    tooltipupdater.cpp
+    notificationwidget.cpp
+    notificationconfirmjob.cpp
+    servernotificationhandler.cpp
     creds/credentialsfactory.cpp
     creds/httpcredentialsgui.cpp
     creds/shibbolethcredentials.cpp
     creds/shibboleth/shibbolethwebview.cpp
     creds/shibboleth/shibbolethuserjob.cpp
+    wizard/postfixlineedit.cpp
     wizard/abstractcredswizardpage.cpp
     wizard/owncloudadvancedsetuppage.cpp
     wizard/owncloudconnectionmethoddialog.cpp
@@ -133,7 +142,6 @@ list(APPEND client_SRCS folderwatcher_mac.cpp)
 ENDIF()
 
 set(3rdparty_SRC
-    ../3rdparty/fancylineedit/fancylineedit.cpp
     ../3rdparty/QProgressIndicator/QProgressIndicator.cpp
     ../3rdparty/qtlockedfile/qtlockedfile.cpp
     ../3rdparty/qtsingleapplication/qtlocalpeer.cpp
@@ -157,7 +165,6 @@ else()
 endif()
 
 set(3rdparty_INC
-    ${CMAKE_SOURCE_DIR}/src/3rdparty/fancylineedit
     ${CMAKE_SOURCE_DIR}/src/3rdparty/qjson
     ${CMAKE_SOURCE_DIR}/src/3rdparty/QProgressIndicator
     ${CMAKE_SOURCE_DIR}/src/3rdparty/qtlockedfile

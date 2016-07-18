@@ -87,6 +87,16 @@ int OwncloudPropagator::maximumActiveJob()
     return max;
 }
 
+int OwncloudPropagator::hardMaximumActiveJob()
+{
+    int max = maximumActiveJob();
+    return max*2;
+    // FIXME: Wondering if we should hard-limit to 1 if maximumActiveJob() is 1
+    // to support our old use case of limiting concurrency (when "automatic" bandwidth
+    // limiting is set. But this causes https://github.com/owncloud/client/issues/4081
+}
+
+
 /** Updates, creates or removes a blacklist entry for the given item.
  *
  * Returns whether the file is in the blacklist now.
@@ -288,21 +298,6 @@ PropagateItemJob* OwncloudPropagator::createJob(const SyncFileItemPtr &item) {
 void OwncloudPropagator::start(const SyncFileItemVector& items)
 {
     Q_ASSERT(std::is_sorted(items.begin(), items.end()));
-
-    /* Check and log the transmission checksum type */
-    ConfigFile cfg;
-    const QString checksumType = cfg.transmissionChecksum();
-
-    /* if the checksum type is empty, it is not sent. No error */
-    if( !checksumType.isEmpty() ) {
-        if( checksumType == checkSumAdlerC ||
-                checksumType == checkSumMD5C    ||
-                checksumType == checkSumSHA1C ) {
-            qDebug() << "Client sends transmission checksum type" << checksumType;
-        } else {
-            qWarning() << "Unknown transmission checksum type from config" << checksumType;
-        }
-    }
 
     /* This builds all the jobs needed for the propagation.
      * Each directory is a PropagateDirectory job, which contains the files in it.
@@ -518,9 +513,31 @@ QString OwncloudPropagator::getFilePath(const QString& tmp_file_name) const
 
 void OwncloudPropagator::scheduleNextJob()
 {
-    if (this->_activeJobs < maximumActiveJob()) {
+    // TODO: If we see that the automatic up-scaling has a bad impact we
+    // need to check how to avoid this.
+    // Down-scaling on slow networks? https://github.com/owncloud/client/issues/3382
+    // Making sure we do up/down at same time? https://github.com/owncloud/client/issues/1633
+
+    if (_activeJobList.count() < maximumActiveJob()) {
         if (_rootJob->scheduleNextJob()) {
-            QTimer::singleShot(100, this, SLOT(scheduleNextJob()));
+            QTimer::singleShot(0, this, SLOT(scheduleNextJob()));
+        }
+    } else if (_activeJobList.count() < hardMaximumActiveJob()) {
+        int likelyFinishedQuicklyCount = 0;
+        // NOTE: Only counts the first 3 jobs! Then for each
+        // one that is likely finished quickly, we can launch another one.
+        // When a job finishes another one will "move up" to be one of the first 3 and then
+        // be counted too.
+        for (int i = 0; i < maximumActiveJob() && i < _activeJobList.count(); i++) {
+            if (_activeJobList.at(i)->isLikelyFinishedQuickly()) {
+                likelyFinishedQuicklyCount++;
+            }
+        }
+        if (_activeJobList.count() < maximumActiveJob() + likelyFinishedQuicklyCount) {
+            qDebug() <<  "Can pump in another request!";
+            if (_rootJob->scheduleNextJob()) {
+                QTimer::singleShot(0, this, SLOT(scheduleNextJob()));
+            }
         }
     }
 }
@@ -675,6 +692,7 @@ void PropagateDirectory::slotSubJobFinished(SyncFileItem::Status status)
 
 void PropagateDirectory::finalize()
 {
+    bool ok = true;
     if (!_item->isEmpty() && _hasError == SyncFileItem::NoStatus) {
         if( !_item->_renameTarget.isEmpty() ) {
             _item->_file = _item->_renameTarget;
@@ -688,13 +706,20 @@ void PropagateDirectory::finalize()
                 }
             }
             SyncJournalFileRecord record(*_item,  _propagator->_localDir + _item->_file);
-            _propagator->_journal->setFileRecordMetadata(record);
+            ok = _propagator->_journal->setFileRecordMetadata(record);
+            if (!ok) {
+                _item->_status = SyncFileItem::FatalError;
+                _item->_errorString = tr("Error writing metadata to the database");
+                qWarning() << "Error writing to the database for file" << _item->_file;
+            }
         }
     }
     _state = Finished;
     // Just to make sure that the SocketApi will know by looking in
     // SyncEngine::_syncedItems that this folder is done synchronizing.
-    _item->_status = SyncFileItem::Success;
+    if (ok) {
+        _item->_status = SyncFileItem::Success;
+    }
 
     emit itemCompleted(*_item, *this);
     emit finished(_item->_status);
@@ -722,11 +747,13 @@ void CleanupPollsJob::start()
 
     auto info = _pollInfos.first();
     _pollInfos.pop_front();
-    SyncFileItemPtr item(new SyncFileItem(
-            _journal->getFileRecord(info._file).toSyncFileItem()));
-    PollJob *job = new PollJob(_account, info._url, item, _journal, _localPath, this);
-    connect(job, SIGNAL(finishedSignal()), SLOT(slotPollFinished()));
-    job->start();
+    SyncJournalFileRecord record = _journal->getFileRecord(info._file);
+    SyncFileItemPtr item(new SyncFileItem(record.toSyncFileItem()));
+    if (record.isValid()) {
+        PollJob *job = new PollJob(_account, info._url, item, _journal, _localPath, this);
+        connect(job, SIGNAL(finishedSignal()), SLOT(slotPollFinished()));
+        job->start();
+    }
 }
 
 void CleanupPollsJob::slotPollFinished()
@@ -739,7 +766,13 @@ void CleanupPollsJob::slotPollFinished()
     } else if (job->_item->_status != SyncFileItem::Success) {
         qDebug() << "There was an error with file " << job->_item->_file << job->_item->_errorString;
     } else {
-        _journal->setFileRecord(SyncJournalFileRecord(*job->_item, _localPath + job->_item->_file));
+        if (!_journal->setFileRecord(SyncJournalFileRecord(*job->_item, _localPath + job->_item->_file))) {
+            qWarning() << "database error";
+            job->_item->_status = SyncFileItem::FatalError;
+            job->_item->_errorString = tr("Error writing metadata to the database");
+            emit aborted(job->_item->_errorString);
+            return;
+        }
     }
     // Continue with the next entry, or finish
     start();

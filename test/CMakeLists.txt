@@ -1,6 +1,10 @@
 include_directories(${CMAKE_BINARY_DIR}/csync ${CMAKE_BINARY_DIR}/csync/src ${CMAKE_BINARY_DIR}/src)
 include_directories(${CMAKE_SOURCE_DIR}/csync/src/)
 include_directories(${CMAKE_SOURCE_DIR}/csync/src/std ${CMAKE_SOURCE_DIR}/src)
+include_directories(${CMAKE_SOURCE_DIR}/src/3rdparty/qtokenizer)
+
+include(QtVersionAbstraction)
+setup_qt()
 
 include(owncloud_add_test.cmake)
 
@@ -26,8 +30,6 @@ if( UNIX AND NOT APPLE )
     owncloud_add_test(InotifyWatcher "${FolderWatcher_SRC}")
 endif(UNIX AND NOT APPLE)
 
-configure_file(oc_bin.h.in oc_bin.h)
-
 owncloud_add_test(CSyncSqlite "")
 owncloud_add_test(NetrcParser ../src/cmd/netrcparser.cpp)
 owncloud_add_test(OwnSql "")
@@ -46,6 +48,7 @@ list(APPEND FolderMan_SRC ../src/gui/folder.cpp )
 list(APPEND FolderMan_SRC ../src/gui/socketapi.cpp )
 list(APPEND FolderMan_SRC ../src/gui/accountstate.cpp )
 list(APPEND FolderMan_SRC ../src/gui/syncrunfilelog.cpp )
+list(APPEND FolderMan_SRC ../src/gui/lockwatcher.cpp )
 list(APPEND FolderMan_SRC ${FolderWatcher_SRC})
 list(APPEND FolderMan_SRC stub.cpp )
 #include_directories(${QTKEYCHAIN_INCLUDE_DIR})

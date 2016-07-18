@@ -34,7 +34,7 @@ QString Progress::asResultString( const SyncFileItem& item)
             return QCoreApplication::translate( "progress", "Uploaded");
         }
     case CSYNC_INSTRUCTION_CONFLICT:
-        return QCoreApplication::translate( "progress", "Downloaded, renamed conflicting file");
+        return QCoreApplication::translate( "progress", "Server version downloaded, copied changed local file into conflict file");
     case CSYNC_INSTRUCTION_REMOVE:
         return QCoreApplication::translate( "progress", "Deleted");
     case CSYNC_INSTRUCTION_EVAL_RENAME:
@@ -127,27 +127,65 @@ void ProgressDispatcher::setProgressInfo(const QString& folder, const ProgressIn
     emit progressInfo( folder, progress );
 }
 
-void ProgressInfo::start()
+ProgressInfo::ProgressInfo()
 {
     connect(&_updateEstimatesTimer, SIGNAL(timeout()), SLOT(updateEstimates()));
+    reset();
+}
+
+void ProgressInfo::reset()
+{
+    _currentItems.clear();
+    _currentDiscoveredFolder.clear();
+    _sizeProgress = Progress();
+    _fileProgress = Progress();
+    _totalSizeOfCompletedJobs = 0;
+    _maxBytesPerSecond = 100000.0;
+    _maxFilesPerSecond = 2.0;
+    _updateEstimatesTimer.stop();
+}
+
+void ProgressInfo::startEstimateUpdates()
+{
     _updateEstimatesTimer.start(1000);
 }
 
-bool ProgressInfo::hasStarted() const
+bool ProgressInfo::isUpdatingEstimates() const
 {
     return _updateEstimatesTimer.isActive();
 }
 
+static bool shouldCountProgress(const SyncFileItem &item)
+{
+    const auto instruction = item._instruction;
+
+    // Don't worry about directories that won't have propagation
+    // jobs associated with them.
+    if (item._isDirectory
+            && (instruction == CSYNC_INSTRUCTION_NONE
+                || instruction == CSYNC_INSTRUCTION_SYNC
+                || instruction == CSYNC_INSTRUCTION_CONFLICT)) {
+        return false;
+    }
+
+    // Skip any ignored or error files, we do nothing with them.
+    if (instruction == CSYNC_INSTRUCTION_IGNORE
+            || instruction == CSYNC_INSTRUCTION_ERROR) {
+        return false;
+    }
+
+    return true;
+}
+
 void ProgressInfo::adjustTotalsForFile(const SyncFileItem &item)
 {
-    if (!item._isDirectory) {
-        _fileProgress._total++;
-        if (isSizeDependent(item)) {
-            _sizeProgress._total += item._size;
-        }
-    } else if (item._instruction != CSYNC_INSTRUCTION_NONE) {
-        // Added or removed directories certainly count.
-        _fileProgress._total++;
+    if (!shouldCountProgress(item)) {
+        return;
+    }
+
+    _fileProgress._total += item._affectedItems;
+    if (isSizeDependent(item)) {
+        _sizeProgress._total += item._size;
     }
 }
 
@@ -178,6 +216,10 @@ quint64 ProgressInfo::completedSize() const
 
 void ProgressInfo::setProgressComplete(const SyncFileItem &item)
 {
+    if (!shouldCountProgress(item)) {
+        return;
+    }
+
     _currentItems.remove(item._file);
     _fileProgress.setCompleted(_fileProgress._completed + item._affectedItems);
     if (ProgressInfo::isSizeDependent(item)) {
@@ -189,6 +231,10 @@ void ProgressInfo::setProgressComplete(const SyncFileItem &item)
 
 void ProgressInfo::setProgressItem(const SyncFileItem &item, quint64 completed)
 {
+    if (!shouldCountProgress(item)) {
+        return;
+    }
+
     _currentItems[item._file]._item = item;
     _currentItems[item._file]._progress._total = item._size;
     _currentItems[item._file]._progress.setCompleted(completed);

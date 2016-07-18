@@ -29,7 +29,7 @@ namespace OCC {
 ShareLinkWidget::ShareLinkWidget(AccountPtr account,
                                  const QString &sharePath,
                                  const QString &localPath,
-                                 bool resharingAllowed,
+                                 SharePermissions maxSharingPermissions,
                                  bool autoShare,
                                  QWidget *parent) :
    QWidget(parent),
@@ -40,7 +40,7 @@ ShareLinkWidget::ShareLinkWidget(AccountPtr account,
     _passwordJobRunning(false),
     _manager(NULL),
     _share(NULL),
-    _resharingAllowed(resharingAllowed),
+    _maxSharingPermissions(maxSharingPermissions),
     _autoShare(autoShare),
     _passwordRequired(false)
 {
@@ -98,17 +98,6 @@ ShareLinkWidget::ShareLinkWidget(AccountPtr account,
         return;
     }
 
-    // error label, red box and stuff
-    _ui->errorLabel->setLineWidth(1);
-    _ui->errorLabel->setFrameStyle(QFrame::Plain);
-
-    QPalette errPalette = _ui->errorLabel->palette();
-    errPalette.setColor(QPalette::Active, QPalette::Base, QColor(0xaa, 0x4d, 0x4d));
-    errPalette.setColor(QPalette::Active, QPalette::WindowText, QColor(0xaa, 0xaa, 0xaa));
-
-    _ui->errorLabel->setPalette(errPalette);
-    _ui->errorLabel->setFrameShape(QFrame::Box);
-    _ui->errorLabel->setContentsMargins(QMargins(12,12,12,12));
     _ui->errorLabel->hide();
 
 
@@ -153,6 +142,10 @@ void ShareLinkWidget::setExpireDate(const QDate &date)
 
 void ShareLinkWidget::slotExpireSet()
 {
+    auto date = _share->getExpireDate();
+    if (date.isValid()) {
+        _ui->calendar->setDate(date);
+    }
     _pi_date->stopAnimation();
 }
 
@@ -292,7 +285,7 @@ void ShareLinkWidget::slotSharesFetched(const QList<QSharedPointer<Share>> &shar
         setShareCheckBoxTitle(true);
     } else {
         // If its clear that resharing is not allowed, display an error
-        if( !_resharingAllowed ) {
+        if( !(_maxSharingPermissions & SharePermissionShare) ) {
             displayError(tr("The file can not be shared because it was shared without sharing permission."));
             _ui->checkBox_shareLink->setEnabled(false);
         } else if (_autoShare && _ui->checkBox_shareLink->isEnabled()) {
