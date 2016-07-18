@@ -96,12 +96,12 @@ bool ownCloudTheme::multiAccount() const
 
 QString ownCloudTheme::helpUrl() const
 {
-    return QString::fromLatin1("https://sbox-svd-bau.svdgmbh.at/");
+    return QString::fromLatin1("https://projektservice.svdgmbh.at/");
 }
 
 QString ownCloudTheme::overrideServerUrl() const 
 {
-    return QString::fromLatin1("https://sbox-svd-bau.svdgmbh.at/");
+    return QString::fromLatin1("https://projektservice.svdgmbh.at/");
 }
 
 #ifndef TOKEN_AUTH_ONLY
@@ -124,12 +124,12 @@ QPixmap ownCloudTheme::wizardHeaderLogo() const
 
 QString ownCloudTheme::appName() const
 {
-    return QLatin1String("S-BOX SVD-Bau");
+    return QLatin1String("SVD Projektservice");
 }
 
 QString ownCloudTheme::appNameGUI() const
 {
-    return QLatin1String("S-BOX SVD-Bau");
+    return QLatin1String("SVD Projektservice");
 }
 
 
